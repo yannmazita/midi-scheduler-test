@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  min-width: 0;
+}
+
+@layer base {
+  :root {
+    --background: 230 15% 95%;
+    --foreground: 230 25% 20%;
+    --card: 230 15% 98%;
+    --card-foreground: 230 25% 20%;
+    --popover: 230 15% 98%;
+    --popover-foreground: 230 25% 20%;
+    --primary: 260 100% 60%;
+    --primary-foreground: 230 10% 98%;
+    --secondary: 230 15% 90%;
+    --secondary-foreground: 260 100% 60%;
+    --muted: 230 10% 92%;
+    --muted-foreground: 230 20% 40%;
+    --accent: 135 100% 60%;
+    --accent-foreground: 230 10% 98%;
+    --destructive: 0 100% 60%;
+    --destructive-foreground: 230 10% 98%;
+    --border: 230 15% 85%;
+    --input: 230 15% 85%;
+    --ring: 260 100% 60%;
+    --chart-1: 260 100% 60%;
+    --chart-2: 135 100% 60%;
+    --chart-3: 30 100% 60%;
+    --chart-4: 310 100% 60%;
+    --chart-5: 190 100% 60%;
+  }
+
+  .dark {
+    --background: 230 15% 15%;
+    --foreground: 60 30% 96%;
+    --card: 230 15% 17%;
+    --card-foreground: 60 30% 96%;
+    --popover: 230 15% 17%;
+    --popover-foreground: 60 30% 96%;
+    --primary: 260 100% 70%;
+    --primary-foreground: 230 10% 10%;
+    --secondary: 230 15% 25%;
+    --secondary-foreground: 260 100% 70%;
+    --muted: 230 15% 22%;
+    --muted-foreground: 60 20% 70%;
+    --accent: 135 100% 70%;
+    --accent-foreground: 230 10% 10%;
+    --destructive: 0 100% 70%;
+    --destructive-foreground: 230 10% 98%;
+    --border: 230 15% 25%;
+    --input: 230 15% 25%;
+    --ring: 260 100% 70%;
+    --chart-1: 260 100% 70%;
+    --chart-2: 135 100% 70%;
+    --chart-3: 30 100% 70%;
+    --chart-4: 310 100% 70%;
+    --chart-5: 190 100% 70%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+@layer utilities {
+  .input-no-wheel {
+    /* Standard property */
+    appearance: textfield;
+
+    /* Chrome, Safari, Edge, Opera */
+    &::-webkit-outer-spin-button,
+    &::-webkit-inner-spin-button {
+      -webkit-appearance: none;
+      margin: 0;
+    }
+
+    /* Firefox */
+    &[type="number"] {
+      -moz-appearance: textfield;
+    }
+  }
+}
