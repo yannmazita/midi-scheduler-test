@@ -1,18 +1,39 @@
 // src/services/SchedulerService.ts
-import { MidiData, MidiNoteOffEvent, MidiNoteOnEvent } from "midi-file";
+import {
+  MidiData,
+  MidiEvent,
+  MidiNoteOffEvent,
+  MidiNoteOnEvent,
+} from "midi-file";
 
 export interface SchedulerService {
   loadMidiData(midiData: MidiData): void;
-  play(): void;
-  pause(): void;
-  resume(): void;
+  play(): Promise<void>;
+  pause(): Promise<void>;
+  resume(): Promise<void>;
   stop(): void;
 }
 
+interface ScheduledNote {
+  event: MidiEvent;
+  time: number;
+  processed: boolean;
+}
+
 export class SchedulerServiceImpl implements SchedulerService {
-  private audioContext: BaseAudioContext;
+  private audioContext: AudioContext;
   private midiData: MidiData | null = null;
-  private oscillators = new Map<number, OscillatorNode>(); // Track active oscillators
+  private oscillators = new Map<number, OscillatorNode>();
+  private scheduledNotes: ScheduledNote[] = [];
+  private schedulerTimer: number | null = null;
+  private currentTime = 0;
+  private isPlaying = false;
+  private tempoBPM = 120;
+
+  // Scheduler constants
+  private readonly LOOKAHEAD = 0.1; // How far ahead to schedule audio (seconds)
+  private readonly SCHEDULE_INTERVAL = 25; // How frequently to call scheduling function (milliseconds)
+  private readonly SCHEDULE_AHEAD = 0.1; // How far ahead to schedule events (seconds)
 
   constructor() {
     this.audioContext = new AudioContext();
@@ -20,62 +41,115 @@ export class SchedulerServiceImpl implements SchedulerService {
 
   loadMidiData(midiData: MidiData): void {
     this.midiData = midiData;
-    this.oscillators.clear(); // Clear oscillators when loading new MIDI data
+    this.oscillators.clear();
+    this.scheduledNotes = [];
+    this.currentTime = 0;
+    this.prepareEvents();
   }
 
-  play(): void {
-    if (!this.midiData) {
-      console.warn("No MIDI data loaded.");
-      return;
-    }
+  private prepareEvents(): void {
+    if (!this.midiData?.tracks) return;
 
-    const tracks = this.midiData.tracks;
-    if (!tracks) {
-      console.warn("No tracks found in MIDI data.");
-      return;
-    }
-
-    const header = this.midiData.header;
-    const ticksPerBeat = header.ticksPerBeat ?? 96; // Default ticks per beat if not specified
-    const tempoBPM = 120; // Fixed tempo for now (120 BPM)
-    const secondsPerBeat = 60 / tempoBPM;
+    const ticksPerBeat = this.midiData.header.ticksPerBeat ?? 96;
+    const secondsPerBeat = 60 / this.tempoBPM;
     const secondsPerTick = secondsPerBeat / ticksPerBeat;
 
-    let currentPlayTime = this.audioContext.currentTime; // Initialize currentPlayTime once
+    let currentTime = 0;
 
-    tracks.forEach((track) => {
+    this.midiData.tracks.forEach((track) => {
       track.forEach((event) => {
-        currentPlayTime += event.deltaTime * secondsPerTick; // Accumulate deltaTime for all events
-
-        if (event.type === "noteOn") {
-          const noteOnEvent = event;
-          this.scheduleNoteOn(noteOnEvent, currentPlayTime);
-        } else if (event.type === "noteOff") {
-          const noteOffEvent = event;
-          this.scheduleNoteOff(noteOffEvent, currentPlayTime);
+        currentTime += event.deltaTime * secondsPerTick;
+        if (event.type === "noteOn" || event.type === "noteOff") {
+          this.scheduledNotes.push({
+            event,
+            time: currentTime,
+            processed: false,
+          });
         }
       });
     });
+
+    // Sort events by time
+    this.scheduledNotes.sort((a, b) => a.time - b.time);
   }
 
-  pause(): void {
-    // Implementation for pause will be added later
-    console.log("Pause not yet implemented");
+  async play(): Promise<void> {
+    if (!this.midiData || this.isPlaying) return;
+
+    this.isPlaying = true;
+    await this.audioContext.resume();
+    this.currentTime = 0;
+    this.resetEvents();
+    this.startScheduler();
   }
 
-  resume(): void {
-    // Implementation for resume will be added later
-    console.log("Resume not yet implemented");
+  private resetEvents(): void {
+    this.scheduledNotes.forEach((note) => (note.processed = false));
+  }
+
+  private startScheduler(): void {
+    const scheduleNotes = () => {
+      const currentTime = this.audioContext.currentTime;
+      const lookAheadTime = currentTime + this.SCHEDULE_AHEAD;
+
+      this.scheduledNotes.forEach((note) => {
+        if (!note.processed && note.time <= lookAheadTime) {
+          if (note.event.type === "noteOn") {
+            this.scheduleNoteOn(
+              note.event,
+              this.audioContext.currentTime + note.time,
+            );
+          } else if (note.event.type === "noteOff") {
+            this.scheduleNoteOff(
+              note.event,
+              this.audioContext.currentTime + note.time,
+            );
+          }
+          note.processed = true;
+        }
+      });
+
+      if (this.isPlaying) {
+        this.schedulerTimer = window.setTimeout(
+          scheduleNotes,
+          this.SCHEDULE_INTERVAL,
+        );
+      }
+    };
+
+    scheduleNotes();
+  }
+
+  async pause(): Promise<void> {
+    this.isPlaying = false;
+    if (this.schedulerTimer !== null) {
+      window.clearTimeout(this.schedulerTimer);
+      this.schedulerTimer = null;
+    }
+    await this.audioContext.suspend();
+  }
+
+  async resume(): Promise<void> {
+    if (!this.isPlaying) {
+      this.isPlaying = true;
+      await this.audioContext.resume();
+      this.startScheduler();
+    }
   }
 
   stop(): void {
-    // Stop all oscillators
+    this.isPlaying = false;
+    if (this.schedulerTimer !== null) {
+      window.clearTimeout(this.schedulerTimer);
+      this.schedulerTimer = null;
+    }
     this.oscillators.forEach((oscillator) => {
       oscillator.stop(this.audioContext.currentTime);
       oscillator.disconnect();
     });
     this.oscillators.clear();
-    console.log("Stopping MIDI");
+    this.currentTime = 0;
+    this.resetEvents();
   }
 
   private scheduleNoteOn(event: MidiNoteOnEvent, playTime: number): void {
@@ -83,42 +157,36 @@ export class SchedulerServiceImpl implements SchedulerService {
     const oscillator = this.audioContext.createOscillator();
     const gainNode = this.audioContext.createGain();
 
-    oscillator.type = "sine"; // Basic sine wave for now
-    oscillator.frequency.setValueAtTime(
-      frequency,
-      this.audioContext.currentTime,
-    );
-    gainNode.gain.setValueAtTime(
-      event.velocity / 127,
-      this.audioContext.currentTime,
-    ); // Velocity control
-    gainNode.gain.setValueAtTime(0, playTime + 0.5); // simple fade out
+    oscillator.type = "sine";
+    oscillator.frequency.setValueAtTime(frequency, playTime);
+    gainNode.gain.setValueAtTime(event.velocity / 127, playTime);
 
     oscillator.connect(gainNode);
     gainNode.connect(this.audioContext.destination);
 
     oscillator.start(playTime);
-    oscillator.stop(playTime + 0.5); // Placeholder: fixed note duration of 0.5 seconds. Needs proper noteOff event handling.
-
-    this.oscillators.set(event.noteNumber, oscillator); // Track oscillator for stop function
+    this.oscillators.set(event.noteNumber, oscillator);
   }
 
   private scheduleNoteOff(event: MidiNoteOffEvent, playTime: number): void {
-    // Note off scheduling will be implemented later
-    console.log(`Note Off event for note ${event.noteNumber} at ${playTime}`);
     const oscillator = this.oscillators.get(event.noteNumber);
     if (oscillator) {
-      oscillator.stop(playTime);
+      const gainNode = this.audioContext.createGain();
+      oscillator.connect(gainNode);
+      gainNode.connect(this.audioContext.destination);
+
+      // Apply a quick fade out
+      gainNode.gain.setValueAtTime(gainNode.gain.value, playTime);
+      gainNode.gain.linearRampToValueAtTime(0, playTime + 0.03);
+
+      oscillator.stop(playTime + 0.03);
       this.oscillators.delete(event.noteNumber);
     }
   }
 
   private midiNoteToFrequency(noteNumber: number): number {
     const A4_FREQUENCY = 440;
-    const A4_NOTE_NUMBER = 69; // MIDI note number for A4
-
-    const exponent = (noteNumber - A4_NOTE_NUMBER) / 12;
-    const frequency = A4_FREQUENCY * Math.pow(2, exponent);
-    return frequency;
+    const A4_NOTE_NUMBER = 69;
+    return A4_FREQUENCY * Math.pow(2, (noteNumber - A4_NOTE_NUMBER) / 12);
   }
 }
