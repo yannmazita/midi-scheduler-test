@@ -114,8 +114,8 @@ export class SchedulerServiceImpl implements SchedulerService {
     this.timeSignatures = [];
     this.volumeChanges.clear();
     this.analyzeTempoAndTimeSignature();
-    this.prepareEvents();
     this.analyzeVolumeChanges();
+    this.prepareEvents();
   }
 
   private analyzeVolumeChanges(): void {
