@@ -42,6 +42,13 @@ interface TimeSignatureChange {
   timeSeconds: number;
 }
 
+interface VolumeChange {
+  tick: number;
+  channel: number;
+  volume: number;
+  timeSeconds: number;
+}
+
 export class SchedulerServiceImpl implements SchedulerService {
   private audioContext: AudioContext;
   private midiData: MidiData | null = null;
@@ -53,6 +60,8 @@ export class SchedulerServiceImpl implements SchedulerService {
   private position: Position | null = null;
   private isPlaying = false;
   private activeGainNodes = new Map<number, GainNode>();
+  private channelGainNodes = new Map<number, GainNode>();
+  private masterGainNode: GainNode | null = null;
 
   // Tempo tracking
   private tempoChanges: TempoChange[] = [];
@@ -69,6 +78,11 @@ export class SchedulerServiceImpl implements SchedulerService {
     timeSeconds: 0,
   };
 
+  // Volume tracking
+
+  private volumeChanges = new Map<number, VolumeChange[]>(); // Map by channel
+  private defaultVolume = 1.0;
+
   // Scheduler constants
   private readonly LOOKAHEAD = 0.1;
   private readonly SCHEDULE_INTERVAL = 25;
@@ -76,6 +90,20 @@ export class SchedulerServiceImpl implements SchedulerService {
 
   constructor() {
     this.audioContext = new AudioContext();
+    this.initializeAudioChain();
+  }
+
+  private initializeAudioChain(): void {
+    // Create master gain node
+    this.masterGainNode = this.audioContext.createGain();
+    this.masterGainNode.connect(this.audioContext.destination);
+
+    // Initialize channel gain nodes
+    for (let channel = 0; channel < 16; channel++) {
+      const gainNode = this.audioContext.createGain();
+      gainNode.connect(this.masterGainNode);
+      this.channelGainNodes.set(channel, gainNode);
+    }
   }
 
   loadMidiData(midiData: MidiData): void {
@@ -84,8 +112,67 @@ export class SchedulerServiceImpl implements SchedulerService {
     this.scheduledNotes = [];
     this.tempoChanges = [];
     this.timeSignatures = [];
+    this.volumeChanges.clear();
     this.analyzeTempoAndTimeSignature();
     this.prepareEvents();
+    this.analyzeVolumeChanges();
+  }
+
+  private analyzeVolumeChanges(): void {
+    if (!this.midiData?.tracks) return;
+
+    // Initialize all channels with default volume
+    for (let channel = 0; channel < 16; channel++) {
+      this.volumeChanges.set(channel, [
+        {
+          tick: 0,
+          channel,
+          volume: this.defaultVolume,
+          timeSeconds: 0,
+        },
+      ]);
+    }
+
+    let currentTick = 0;
+    this.midiData.tracks.forEach((track) => {
+      currentTick = 0;
+      track.forEach((event) => {
+        currentTick += event.deltaTime;
+
+        if (event.type === "controller" && event.controllerType === 7) {
+          const timeSeconds = this.ticksToSeconds(currentTick);
+          const channelChanges = this.volumeChanges.get(event.channel) ?? [];
+          channelChanges.push({
+            tick: currentTick,
+            channel: event.channel,
+            volume: event.value / 127,
+            timeSeconds,
+          });
+          this.volumeChanges.set(event.channel, channelChanges);
+        }
+      });
+    });
+
+    // Sort each channel's changes by tick
+    this.volumeChanges.forEach((changes) => {
+      changes.sort((a, b) => a.tick - b.tick);
+    });
+  }
+
+  private getVolumeAtTime(channel: number, timeSeconds: number): number {
+    const changes = this.volumeChanges.get(channel);
+    if (!changes || changes.length === 0) {
+      return this.defaultVolume;
+    }
+
+    // Find the last volume change before or at the current time
+    for (let i = changes.length - 1; i >= 0; i--) {
+      if (timeSeconds >= changes[i].timeSeconds) {
+        return changes[i].volume;
+      }
+    }
+
+    return changes[0].volume; // Return initial volume if no changes found
   }
 
   private analyzeTempoAndTimeSignature(): void {
@@ -416,28 +503,49 @@ export class SchedulerServiceImpl implements SchedulerService {
           console.error("Error closing audio context:", error);
         });
     }
+
+    // Clean up channel gain nodes
+    this.channelGainNodes.forEach((gainNode) => {
+      gainNode.disconnect();
+    });
+    this.channelGainNodes.clear();
+
+    if (this.masterGainNode) {
+      this.masterGainNode.disconnect();
+      this.masterGainNode = null;
+    }
+
+    // Reinitialize audio chain
+    this.initializeAudioChain();
   }
 
   private scheduleNoteOn(event: MidiNoteOnEvent, playTime: number): void {
     const frequency = this.midiNoteToFrequency(event.noteNumber);
     const oscillator = this.audioContext.createOscillator();
-    const gainNode = this.audioContext.createGain();
+    const noteGainNode = this.audioContext.createGain();
+    const channelGainNode =
+      this.channelGainNodes.get(event.channel) || this.masterGainNode!;
 
     oscillator.type = "sine";
     oscillator.frequency.setValueAtTime(frequency, playTime);
 
-    gainNode.gain.setValueAtTime(0, playTime);
-    gainNode.gain.linearRampToValueAtTime(
-      event.velocity / 127,
-      playTime + 0.005,
+    // Get the volume at the scheduled time
+    const scheduledTimeSeconds = playTime - this.startTime!;
+    const channelVolume = this.getVolumeAtTime(
+      event.channel,
+      scheduledTimeSeconds,
     );
+    const finalVolume = (event.velocity / 127) * channelVolume;
 
-    oscillator.connect(gainNode);
-    gainNode.connect(this.audioContext.destination);
+    noteGainNode.gain.setValueAtTime(0, playTime);
+    noteGainNode.gain.linearRampToValueAtTime(finalVolume, playTime + 0.005);
+
+    oscillator.connect(noteGainNode);
+    noteGainNode.connect(channelGainNode);
 
     oscillator.start(playTime);
     this.oscillators.set(event.noteNumber, oscillator);
-    this.activeGainNodes.set(event.noteNumber, gainNode);
+    this.activeGainNodes.set(event.noteNumber, noteGainNode);
   }
 
   private scheduleNoteOff(event: MidiNoteOffEvent, playTime: number): void {
