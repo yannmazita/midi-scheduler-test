@@ -14,15 +14,31 @@ export interface SchedulerService {
   stop(): void;
 }
 
+interface Position {
+  measure: number;
+  beat: number;
+  ticksInBeat: number;
+}
+
 interface ScheduledNote {
   event: MidiEvent;
   time: number;
   processed: boolean;
+  position: Position;
 }
 
 interface TempoChange {
   tick: number;
   tempo: number; // microseconds per quarter note
+  timeSeconds: number;
+}
+
+interface TimeSignatureChange {
+  tick: number;
+  numerator: number;
+  denominator: number;
+  metronome: number;
+  thirtySeconds: number;
   timeSeconds: number;
 }
 
@@ -32,14 +48,26 @@ export class SchedulerServiceImpl implements SchedulerService {
   private oscillators = new Map<number, OscillatorNode>();
   private scheduledNotes: ScheduledNote[] = [];
   private schedulerTimer: number | null = null;
+  private startTime: number | null = null;
   private currentTime = 0;
+  private position: Position | null = null;
   private isPlaying = false;
   private activeGainNodes = new Map<number, GainNode>();
-  private startTime: number | null = null;
 
   // Tempo tracking
   private tempoChanges: TempoChange[] = [];
   private defaultTempo = 500000; // 120 BPM in microseconds per quarter note
+
+  // Time signature tracking
+  private timeSignatures: TimeSignatureChange[] = [];
+  private defaultTimeSignature: TimeSignatureChange = {
+    tick: 0,
+    numerator: 4,
+    denominator: 4,
+    metronome: 24,
+    thirtySeconds: 8,
+    timeSeconds: 0,
+  };
 
   // Scheduler constants
   private readonly LOOKAHEAD = 0.1;
@@ -55,26 +83,29 @@ export class SchedulerServiceImpl implements SchedulerService {
     this.oscillators.clear();
     this.scheduledNotes = [];
     this.tempoChanges = [];
-    this.currentTime = 0;
-    this.analyzeMidiData();
+    this.timeSignatures = [];
+    this.analyzeTempoAndTimeSignature();
     this.prepareEvents();
   }
 
-  private analyzeMidiData(): void {
+  private analyzeTempoAndTimeSignature(): void {
     if (!this.midiData?.tracks) return;
 
     let currentTick = 0;
-    const currentTempo = this.defaultTempo;
     let currentTimeSeconds = 0;
 
-    // Initialize with default tempo
+    // Initialize with defaults
     this.tempoChanges.push({
       tick: 0,
       tempo: this.defaultTempo,
       timeSeconds: 0,
     });
 
-    // Analyze all tracks for tempo changes
+    this.timeSignatures.push({
+      ...this.defaultTimeSignature,
+    });
+
+    // Analyze all tracks for tempo and time signature changes
     this.midiData.tracks.forEach((track) => {
       currentTick = 0;
 
@@ -90,12 +121,116 @@ export class SchedulerServiceImpl implements SchedulerService {
             tempo: tempoEvent.microsecondsPerBeat,
             timeSeconds: currentTimeSeconds,
           });
+        } else if (event.type === "timeSignature") {
+          const tsEvent = event;
+          currentTimeSeconds = this.ticksToSeconds(currentTick);
+
+          this.timeSignatures.push({
+            tick: currentTick,
+            numerator: tsEvent.numerator,
+            denominator: Math.pow(2, tsEvent.denominator),
+            metronome: tsEvent.metronome,
+            thirtySeconds: tsEvent.thirtyseconds,
+            timeSeconds: currentTimeSeconds,
+          });
         }
       });
     });
 
-    // Sort tempo changes by tick
+    // Sort changes by tick
     this.tempoChanges.sort((a, b) => a.tick - b.tick);
+    this.timeSignatures.sort((a, b) => a.tick - b.tick);
+  }
+
+  // Get current time signature at a given tick
+  private getTimeSignatureAtTick(tick: number): TimeSignatureChange {
+    let timeSignature = this.defaultTimeSignature;
+
+    for (let i = this.timeSignatures.length - 1; i >= 0; i--) {
+      if (tick >= this.timeSignatures[i].tick) {
+        timeSignature = this.timeSignatures[i];
+        break;
+      }
+    }
+
+    return timeSignature;
+  }
+
+  // Calculate measure number and beat position
+  private getPositionAtTick(tick: number): {
+    measure: number;
+    beat: number;
+    ticksInBeat: number;
+  } {
+    if (!this.midiData?.header.ticksPerBeat) {
+      return { measure: 0, beat: 0, ticksInBeat: 0 };
+    }
+
+    let currentTick = 0;
+    let measure = 0;
+    let currentTimeSignature = this.defaultTimeSignature;
+    const ticksPerBeat = this.midiData.header.ticksPerBeat;
+
+    // Find the correct time signature and calculate measures
+    for (const ts of this.timeSignatures) {
+      if (tick < ts.tick) {
+        break;
+      }
+
+      // Calculate full measures in the previous time signature
+      const ticksInThisSection = ts.tick - currentTick;
+      const ticksPerMeasure = ticksPerBeat * currentTimeSignature.numerator;
+      measure += Math.floor(ticksInThisSection / ticksPerMeasure);
+
+      currentTick = ts.tick;
+      currentTimeSignature = ts;
+    }
+
+    // Calculate remaining ticks
+    const remainingTicks = tick - currentTick;
+    const ticksPerMeasure = ticksPerBeat * currentTimeSignature.numerator;
+
+    // Add remaining full measures
+    measure += Math.floor(remainingTicks / ticksPerMeasure);
+
+    // Calculate beat within measure
+    const ticksIntoMeasure = remainingTicks % ticksPerMeasure;
+    const beat = Math.floor(ticksIntoMeasure / ticksPerBeat);
+    const ticksInBeat = ticksIntoMeasure % ticksPerBeat;
+
+    return {
+      measure,
+      beat,
+      ticksInBeat,
+    };
+  }
+
+  getCurrentPosition(): {
+    measure: number;
+    beat: number;
+    timeSignature: TimeSignatureChange;
+  } | null {
+    if (!this.isPlaying || !this.startTime) return null;
+
+    const currentTime = this.audioContext.currentTime - this.startTime;
+    let currentTick = 0;
+
+    // Find current tick based on time
+    for (const note of this.scheduledNotes) {
+      if (note.time > currentTime) {
+        break;
+      }
+      currentTick = note.time;
+    }
+
+    const position = this.getPositionAtTick(currentTick);
+    const timeSignature = this.getTimeSignatureAtTick(currentTick);
+
+    return {
+      measure: position.measure,
+      beat: position.beat,
+      timeSignature,
+    };
   }
 
   private ticksToSeconds(ticks: number): number {
@@ -146,11 +281,13 @@ export class SchedulerServiceImpl implements SchedulerService {
 
         if (event.type === "noteOn" || event.type === "noteOff") {
           const timeSeconds = this.ticksToSeconds(currentTick);
+          const position = this.getPositionAtTick(currentTick);
 
           this.scheduledNotes.push({
             event,
             time: timeSeconds,
             processed: false,
+            position, // Store position information
           });
         }
       });
